@@ -1,0 +1,2464 @@
+openapi: 3.1.0
+info:
+  title: Click-Money API
+  version: 0.1.0
+  summary: Gestão de fiado offline-first para pequenos comércios.
+  description: |
+    Contrato inicial da API do Click-Money (Fase 1).
+
+    Convenções:
+
+    - Respostas de sucesso usam o envelope `{ "data": ..., "meta": ... }`.
+    - Erros seguem a RFC 9457 (`application/problem+json`) com um `code` estável.
+    - Valores monetários são inteiros de centavos (`*_cents`). Nunca há ponto flutuante.
+    - Datas civis usam `YYYY-MM-DD` no fuso do comércio; instantes usam RFC 3339 em UTC.
+    - Campos opcionais sem valor são omitidos; a API não envia nem aceita `null`.
+    - Listas são paginadas por cursor opaco (`cursor` e `limit`).
+    - A sessão é mantida por cookies `HttpOnly`. Requisições que alteram estado exigem `X-CSRF-Token`.
+    - O comércio (tenant) vem sempre da sessão, nunca do corpo ou da URL.
+  license:
+    name: Proprietária
+    url: https://github.com/JotaMarcos/click-money
+servers:
+  - url: http://localhost:8080
+    description: Desenvolvimento local
+tags:
+  - name: saude
+    description: Verificações de vida e de prontidão.
+  - name: autenticacao
+    description: Cadastro, login e sessão.
+  - name: comercio
+    description: Dados, configurações e membros do comércio.
+  - name: clientes
+    description: Cadastro de clientes, saldo e consentimentos.
+  - name: lancamentos
+    description: Livro-razão de compras no fiado, pagamentos, estornos e ajustes.
+  - name: cobranca
+    description: Mensagens de cobrança, comprovantes e Pix copia e cola.
+  - name: sincronizacao
+    description: Protocolo offline, dispositivos e fila de revisão.
+  - name: relatorios
+    description: Indicadores, fechamento de caixa e exportações.
+  - name: lgpd
+    description: Direitos do titular dos dados.
+security:
+  - sessionCookie: []
+paths:
+  /livez:
+    get:
+      tags: [saude]
+      operationId: getLiveness
+      summary: Verifica se o processo está vivo.
+      security: []
+      responses:
+        "200":
+          description: Processo em execução.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /readyz:
+    get:
+      tags: [saude]
+      operationId: getReadiness
+      summary: Verifica se o serviço pode atender requisições.
+      description: >-
+        O PostgreSQL é obrigatório. O MongoDB indisponível é reportado como
+        `degraded` sem derrubar a prontidão.
+      security: []
+      responses:
+        "200":
+          description: Pronto, possivelmente degradado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Dependência obrigatória indisponível.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/auth/register:
+    post:
+      tags: [autenticacao]
+      operationId: register
+      summary: Cria o usuário Dono e o comércio.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Conta criada e sessão iniciada.
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SessionCookies"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/auth/login:
+    post:
+      tags: [autenticacao]
+      operationId: login
+      summary: Inicia sessão com telefone e senha.
+      description: >-
+        A resposta de erro é a mesma para telefone inexistente e senha errada.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Sessão iniciada.
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SessionCookies"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/auth/refresh:
+    post:
+      tags: [autenticacao]
+      operationId: refreshSession
+      summary: Troca o refresh token por uma nova sessão.
+      description: >-
+        O refresh token é rotativo. Reusar um token já trocado revoga todas as
+        sessões do dispositivo.
+      security:
+        - refreshCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      responses:
+        "200":
+          description: Sessão renovada.
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SessionCookies"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/auth/logout:
+    post:
+      tags: [autenticacao]
+      operationId: logout
+      summary: Encerra a sessão do dispositivo.
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      responses:
+        "204":
+          description: Sessão encerrada.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/me:
+    get:
+      tags: [autenticacao]
+      operationId: getMe
+      summary: Devolve o usuário, o comércio ativo e o papel.
+      responses:
+        "200":
+          description: Sessão atual.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/tenant:
+    get:
+      tags: [comercio]
+      operationId: getTenant
+      summary: Devolve o comércio ativo e suas configurações.
+      parameters:
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: Comércio.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantResponse"
+        "304":
+          description: Sem alteração desde o `ETag` informado.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/tenant/settings:
+    patch:
+      tags: [comercio]
+      operationId: updateTenantSettings
+      summary: Altera as configurações do comércio (Dono).
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantSettingsUpdate"
+      responses:
+        "200":
+          description: Configurações atualizadas.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /v1/members:
+    get:
+      tags: [comercio]
+      operationId: listMembers
+      summary: Lista os membros do comércio.
+      responses:
+        "200":
+          description: Membros.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [comercio]
+      operationId: addMember
+      summary: Adiciona um membro ao comércio (Dono).
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemberInput"
+      responses:
+        "201":
+          description: Membro adicionado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /v1/customers:
+    get:
+      tags: [clientes]
+      operationId: listCustomers
+      summary: Lista clientes com saldo, com busca e filtros.
+      parameters:
+        - name: q
+          in: query
+          description: Busca por nome, apelido ou telefone.
+          schema:
+            type: string
+            maxLength: 80
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, archived]
+            default: active
+        - name: has_debt
+          in: query
+          description: Quando `true`, só clientes com saldo devedor.
+          schema:
+            type: boolean
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [name, balance_desc, oldest_debt]
+            default: name
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Página de clientes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [clientes]
+      operationId: createCustomer
+      summary: Cadastra um cliente.
+      description: >-
+        O `id` é um UUIDv7 gerado pelo cliente da API. Repetir a chamada com o
+        mesmo `id` e o mesmo conteúdo devolve o cliente já criado.
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerInput"
+      responses:
+        "201":
+          description: Cliente criado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /v1/customers/{customer_id}:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+    get:
+      tags: [clientes]
+      operationId: getCustomer
+      summary: Devolve um cliente com o saldo projetado.
+      parameters:
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: Cliente.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerResponse"
+        "304":
+          description: Sem alteração desde o `ETag` informado.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [clientes]
+      operationId: updateCustomer
+      summary: Altera dados cadastrais de um cliente.
+      description: >-
+        Usa controle otimista: `version` deve ser a versão lida. Alterar
+        `credit_limit_cents` exige papel Gerente ou Dono.
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerUpdate"
+      responses:
+        "200":
+          description: Cliente atualizado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /v1/customers/{customer_id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+    post:
+      tags: [clientes]
+      operationId: archiveCustomer
+      summary: Arquiva um cliente com saldo zero.
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      responses:
+        "200":
+          description: Cliente arquivado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /v1/customers/{customer_id}/consents:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+    post:
+      tags: [clientes, lgpd]
+      operationId: recordConsent
+      summary: Registra a concessão ou a revogação de consentimento de comunicação.
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsentInput"
+      responses:
+        "201":
+          description: Consentimento registrado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/customers/{customer_id}/entries:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+    get:
+      tags: [lancamentos]
+      operationId: listCustomerEntries
+      summary: Extrato do cliente, do lançamento mais recente para o mais antigo.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Página do extrato.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntryListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/customers/{customer_id}/open-sales:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+    get:
+      tags: [lancamentos]
+      operationId: listCustomerOpenSales
+      summary: Compras em aberto do cliente, da mais antiga para a mais nova.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Página de compras em aberto.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenSaleListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/customers/{customer_id}/collection-messages:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+    post:
+      tags: [cobranca]
+      operationId: prepareCollectionMessage
+      summary: Prepara uma mensagem de cobrança e o link do WhatsApp.
+      description: >-
+        Não envia nada: devolve o texto e o link `wa.me` para o comerciante
+        revisar e enviar. Recusa fora do horário permitido no fuso do comércio
+        e quando não há consentimento de comunicação.
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionMessageInput"
+      responses:
+        "201":
+          description: Mensagem preparada.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionMessageResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/customers/{customer_id}/pix-code:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+    post:
+      tags: [cobranca]
+      operationId: generatePixCode
+      summary: Gera o Pix copia e cola (BR Code estático) para a dívida.
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PixCodeInput"
+      responses:
+        "201":
+          description: Código gerado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PixCodeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /v1/customers/{customer_id}/data-export:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+    get:
+      tags: [lgpd]
+      operationId: exportCustomerData
+      summary: Exporta todos os dados de um titular (Dono).
+      responses:
+        "200":
+          description: Dados cadastrais, consentimentos e lançamentos do cliente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerDataExportResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/customers/{customer_id}/anonymize:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+    post:
+      tags: [lgpd]
+      operationId: anonymizeCustomer
+      summary: Anonimiza um cliente a pedido do titular (Dono).
+      description: >-
+        Apaga os dados pessoais e mantém os lançamentos. Exige saldo zero e é
+        irreversível.
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnonymizeInput"
+      responses:
+        "204":
+          description: Cliente anonimizado.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /v1/ledger/credit-sales:
+    post:
+      tags: [lancamentos]
+      operationId: recordCreditSale
+      summary: Lança uma compra no fiado.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreditSaleInput"
+      responses:
+        "201":
+          description: Compra lançada.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntryResultResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /v1/ledger/payments:
+    post:
+      tags: [lancamentos]
+      operationId: recordPayment
+      summary: Registra um pagamento e o aloca às compras mais antigas.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentInput"
+      responses:
+        "201":
+          description: Pagamento registrado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntryResultResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /v1/ledger/adjustments:
+    post:
+      tags: [lancamentos]
+      operationId: recordAdjustment
+      summary: Lança um ajuste de saldo (Dono), com motivo.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdjustmentInput"
+      responses:
+        "201":
+          description: Ajuste lançado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntryResultResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /v1/ledger/entries/{entry_id}:
+    parameters:
+      - $ref: "#/components/parameters/EntryId"
+    get:
+      tags: [lancamentos]
+      operationId: getEntry
+      summary: Devolve um lançamento.
+      responses:
+        "200":
+          description: Lançamento.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/ledger/entries/{entry_id}/reversal:
+    parameters:
+      - $ref: "#/components/parameters/EntryId"
+    post:
+      tags: [lancamentos]
+      operationId: reverseEntry
+      summary: Estorna um lançamento, com motivo.
+      description: >-
+        Cria um lançamento `REVERSAL` que referencia o original. O original não
+        é alterado. Um lançamento só pode ser estornado uma vez.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReversalInput"
+      responses:
+        "201":
+          description: Estorno lançado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntryResultResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /v1/ledger/entries/{entry_id}/receipt:
+    parameters:
+      - $ref: "#/components/parameters/EntryId"
+    get:
+      tags: [cobranca]
+      operationId: getEntryReceipt
+      summary: Devolve o comprovante de um lançamento e o link do WhatsApp.
+      responses:
+        "200":
+          description: Comprovante.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceiptResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/devices:
+    get:
+      tags: [sincronizacao]
+      operationId: listDevices
+      summary: Lista os dispositivos registrados no comércio.
+      responses:
+        "200":
+          description: Dispositivos.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/devices/{device_id}/revoke:
+    parameters:
+      - name: device_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Uuid"
+    post:
+      tags: [sincronizacao]
+      operationId: revokeDevice
+      summary: Revoga um dispositivo (aparelho perdido ou roubado).
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      responses:
+        "204":
+          description: Dispositivo revogado e sessões encerradas.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/sync/push:
+    post:
+      tags: [sincronizacao]
+      operationId: syncPush
+      summary: Envia um lote de comandos gravados offline.
+      description: >-
+        Os comandos são processados na ordem do lote, cada um em sua própria
+        transação. Reenviar um `command_id` já processado devolve o mesmo
+        resultado. Um comando rejeitado não interrompe os demais.
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncPushRequest"
+      responses:
+        "200":
+          description: Resultado de cada comando, na ordem recebida.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPushResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sync/pull:
+    get:
+      tags: [sincronizacao]
+      operationId: syncPull
+      summary: Busca as mudanças do comércio depois do cursor.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Página de mudanças, com os saldos projetados atualizados.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPullResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/review-items:
+    get:
+      tags: [sincronizacao]
+      operationId: listReviewItems
+      summary: Lista os comandos que aguardam decisão humana.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, resolved]
+            default: pending
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Página da fila de revisão.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewItemListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/review-items/{review_item_id}/resolve:
+    parameters:
+      - name: review_item_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Uuid"
+    post:
+      tags: [sincronizacao]
+      operationId: resolveReviewItem
+      summary: Resolve um item da fila de revisão (Gerente ou Dono).
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewResolutionInput"
+      responses:
+        "200":
+          description: Item resolvido.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewItemResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /v1/reports/summary:
+    get:
+      tags: [relatorios]
+      operationId: getSummary
+      summary: Indicadores do painel no período informado.
+      description: >-
+        Sem `from` e `to`, o período é o dia de hoje no fuso do comércio.
+      parameters:
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: Indicadores.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SummaryResponse"
+        "304":
+          description: Sem alteração desde o `ETag` informado.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/reports/cash-closing:
+    get:
+      tags: [relatorios]
+      operationId: getCashClosing
+      summary: Total recebido em um dia, por operador e por meio de pagamento.
+      parameters:
+        - name: date
+          in: query
+          description: Data civil no fuso do comércio. Padrão é hoje.
+          schema:
+            $ref: "#/components/schemas/CivilDate"
+        - name: operator_id
+          in: query
+          description: Restringe a um operador. O Caixa só vê o próprio.
+          schema:
+            $ref: "#/components/schemas/Uuid"
+      responses:
+        "200":
+          description: Fechamento de caixa.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CashClosingResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/exports/entries.csv:
+    get:
+      tags: [relatorios]
+      operationId: exportEntriesCsv
+      summary: Exporta os lançamentos do período em CSV (Gerente ou Dono).
+      parameters:
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+      responses:
+        "200":
+          description: Arquivo CSV em UTF-8, separado por ponto e vírgula.
+          content:
+            text/csv:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: cm_access
+      description: Access token opaco de 15 minutos, em cookie `HttpOnly`, `Secure`, `SameSite=Strict`.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: cm_refresh
+      description: Refresh token rotativo, em cookie restrito a `/v1/auth`.
+
+  headers:
+    SessionCookies:
+      description: Define `cm_access`, `cm_refresh` e `cm_csrf`.
+      schema:
+        type: string
+    ETag:
+      description: Versão da representação, para uso em `If-None-Match`.
+      schema:
+        type: string
+
+  parameters:
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: Mesmo valor do cookie `cm_csrf`.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Chave única por comércio para a operação. Repetir a chave com o mesmo
+        corpo devolve a resposta original; com corpo diferente, devolve
+        `IDEMPOTENCY_KEY_REUSED`.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 64
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      schema:
+        type: string
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Cursor opaco devolvido em `meta.next_cursor`.
+      schema:
+        type: string
+        maxLength: 256
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 100
+        default: 50
+    DateFrom:
+      name: from
+      in: query
+      required: false
+      description: Início do período (data civil, inclusive).
+      schema:
+        $ref: "#/components/schemas/CivilDate"
+    DateTo:
+      name: to
+      in: query
+      required: false
+      description: Fim do período (data civil, inclusive).
+      schema:
+        $ref: "#/components/schemas/CivilDate"
+    CustomerId:
+      name: customer_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    EntryId:
+      name: entry_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+
+  responses:
+    BadRequest:
+      description: Requisição malformada ou com campos inválidos.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: Sessão ausente, expirada ou credenciais inválidas.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: Papel sem permissão, dispositivo revogado ou origem não permitida.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: Recurso inexistente neste comércio.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: Conflito de versão, de unicidade ou de chave de idempotência.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PayloadTooLarge:
+      description: Corpo acima do limite ou lote com comandos demais.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unprocessable:
+      description: Regra de negócio violada. O campo `code` identifica a regra.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    TooManyRequests:
+      description: Limite de requisições excedido.
+      headers:
+        Retry-After:
+          description: Segundos até a próxima tentativa permitida.
+          schema:
+            type: integer
+            format: int32
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    # ---------- Tipos básicos ----------
+    Uuid:
+      type: string
+      format: uuid
+      examples: ["01933b7e-8c1a-7c3e-9f4b-2a6d5e8f1b0c"]
+    CivilDate:
+      type: string
+      format: date
+      description: Data civil no fuso do comércio.
+      examples: ["2026-11-13"]
+    Instant:
+      type: string
+      format: date-time
+      description: Instante em UTC (RFC 3339).
+      examples: ["2026-11-14T01:05:00Z"]
+    AmountCents:
+      type: integer
+      format: int64
+      minimum: 1
+      maximum: 100000000
+      description: Valor em centavos, sempre positivo.
+      examples: [2550]
+    BalanceCents:
+      type: integer
+      format: int64
+      description: Saldo em centavos. Positivo é dívida; negativo é crédito a favor do cliente.
+      examples: [12550]
+    PhoneE164:
+      type: string
+      pattern: '^\+[1-9][0-9]{7,14}$'
+      examples: ["+5592991234567"]
+    Role:
+      type: string
+      enum: [OWNER, MANAGER, CASHIER]
+    EntryType:
+      type: string
+      enum: [CREDIT_SALE, PAYMENT, REVERSAL, ADJUSTMENT, INTEREST]
+    Direction:
+      type: string
+      enum: [DEBIT, CREDIT]
+      description: "`DEBIT` aumenta a dívida; `CREDIT` reduz."
+    PaymentMethod:
+      type: string
+      enum: [CASH, PIX, CARD, OTHER]
+    ProblemCode:
+      type: string
+      description: Código estável de erro. Novos códigos podem ser acrescentados.
+      enum:
+        - VALIDATION_FAILED
+        - UNAUTHENTICATED
+        - FORBIDDEN
+        - ORIGIN_NOT_ALLOWED
+        - NOT_FOUND
+        - RATE_LIMITED
+        - PAYLOAD_TOO_LARGE
+        - VERSION_CONFLICT
+        - IDEMPOTENCY_KEY_REUSED
+        - DEVICE_REVOKED
+        - PLAN_LIMIT_REACHED
+        - CUSTOMER_PHONE_TAKEN
+        - CUSTOMER_ARCHIVED
+        - CUSTOMER_HAS_DEBT
+        - CREDIT_LIMIT_EXCEEDED
+        - PAYMENT_EXCEEDS_BALANCE
+        - FUTURE_DATE_NOT_ALLOWED
+        - BACKDATE_REQUIRES_MANAGER
+        - ENTRY_ALREADY_REVERSED
+        - ENTRY_NOT_REVERSIBLE
+        - OUTSIDE_COLLECTION_HOURS
+        - CONSENT_REQUIRED
+        - CUSTOMER_PHONE_MISSING
+        - PIX_KEY_NOT_CONFIGURED
+        - REVIEW_ITEM_ALREADY_RESOLVED
+        - INTERNAL_ERROR
+
+    # ---------- Envelope e erros ----------
+    Meta:
+      type: object
+      properties:
+        request_id:
+          type: string
+    PageMeta:
+      type: object
+      required: [has_more]
+      properties:
+        request_id:
+          type: string
+        next_cursor:
+          type: string
+          description: Ausente quando não há mais páginas.
+        has_more:
+          type: boolean
+    Problem:
+      type: object
+      description: Problem Details (RFC 9457) com extensões do Click-Money.
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          examples: ["/problems/payment-exceeds-balance"]
+        title:
+          type: string
+          examples: ["Pagamento maior que a dívida"]
+        status:
+          type: integer
+          format: int32
+          examples: [422]
+        detail:
+          type: string
+          examples: ["O cliente deve R$ 125,50 e o pagamento informado é de R$ 200,00."]
+        instance:
+          type: string
+          format: uri-reference
+        code:
+          $ref: "#/components/schemas/ProblemCode"
+        request_id:
+          type: string
+        errors:
+          type: array
+          description: Erros por campo, quando `code` é `VALIDATION_FAILED`.
+          items:
+            $ref: "#/components/schemas/FieldError"
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          examples: ["amount_cents"]
+        message:
+          type: string
+          examples: ["Informe um valor maior que zero."]
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ok, degraded, unavailable]
+          examples:
+            - postgres: ok
+              mongodb: degraded
+
+    # ---------- Autenticação ----------
+    RegisterRequest:
+      type: object
+      required: [name, phone, password, tenant_name, device]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        phone:
+          type: string
+          description: Telefone em formato livre; é normalizado para E.164.
+          maxLength: 32
+          examples: ["(92) 99123-4567"]
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+        tenant_name:
+          type: string
+          minLength: 2
+          maxLength: 120
+          examples: ["Mercadinho do Zé"]
+        timezone:
+          type: string
+          default: America/Manaus
+          examples: ["America/Eirunepe"]
+        device:
+          $ref: "#/components/schemas/DeviceInput"
+    LoginRequest:
+      type: object
+      required: [phone, password, device]
+      properties:
+        phone:
+          type: string
+          maxLength: 32
+        password:
+          type: string
+          format: password
+          maxLength: 128
+        device:
+          $ref: "#/components/schemas/DeviceInput"
+    DeviceInput:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: UUIDv7 gerado na instalação do PWA.
+        name:
+          type: string
+          maxLength: 80
+          examples: ["Celular do balcão"]
+    User:
+      type: object
+      required: [id, name, phone]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        name:
+          type: string
+        phone:
+          $ref: "#/components/schemas/PhoneE164"
+        email:
+          type: string
+          format: email
+    Session:
+      type: object
+      required: [user, tenant, role, device_id, access_expires_at]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        tenant:
+          $ref: "#/components/schemas/Tenant"
+        role:
+          $ref: "#/components/schemas/Role"
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        access_expires_at:
+          $ref: "#/components/schemas/Instant"
+        local_data_secret:
+          type: string
+          description: >-
+            Segredo usado para derivar a chave que cifra os dados locais.
+            Enviado apenas em cadastro, login e refresh.
+    SessionResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Session"
+        meta:
+          $ref: "#/components/schemas/Meta"
+
+    # ---------- Comércio ----------
+    Tenant:
+      type: object
+      required: [id, name, timezone, plan, settings]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        name:
+          type: string
+        timezone:
+          type: string
+          examples: ["America/Manaus"]
+        plan:
+          type: string
+          enum: [FREE, PAID, ASSOCIATION]
+        settings:
+          $ref: "#/components/schemas/TenantSettings"
+    TenantSettings:
+      type: object
+      required:
+        - overpayment_policy
+        - credit_limit_mode
+        - max_backdate_days
+        - collection_start_hour
+        - collection_end_hour
+        - collection_on_sundays
+        - collection_on_holidays
+        - interest_enabled
+        - version
+      properties:
+        overpayment_policy:
+          type: string
+          enum: [REJECT, CUSTOMER_CREDIT]
+          description: O que fazer com pagamento maior que a dívida.
+        credit_limit_mode:
+          type: string
+          enum: [WARN, BLOCK]
+        max_backdate_days:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 365
+          description: Dias de retroatividade permitidos sem papel Gerente.
+        collection_start_hour:
+          type: integer
+          format: int32
+          minimum: 8
+          maximum: 19
+        collection_end_hour:
+          type: integer
+          format: int32
+          minimum: 9
+          maximum: 20
+        collection_on_sundays:
+          type: boolean
+        collection_on_holidays:
+          type: boolean
+        interest_enabled:
+          type: boolean
+        late_fee_bps:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 200
+          description: Multa em pontos-base (máximo de 2%).
+        monthly_interest_bps:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 100
+          description: Juros de mora simples ao mês, em pontos-base (máximo de 1%).
+        pix_key:
+          type: string
+          maxLength: 77
+        pix_merchant_name:
+          type: string
+          maxLength: 25
+        pix_merchant_city:
+          type: string
+          maxLength: 15
+        version:
+          type: integer
+          format: int64
+    TenantSettingsUpdate:
+      type: object
+      required: [version]
+      properties:
+        version:
+          type: integer
+          format: int64
+          description: Versão lida, para controle otimista.
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        timezone:
+          type: string
+        overpayment_policy:
+          type: string
+          enum: [REJECT, CUSTOMER_CREDIT]
+        credit_limit_mode:
+          type: string
+          enum: [WARN, BLOCK]
+        max_backdate_days:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 365
+        collection_start_hour:
+          type: integer
+          format: int32
+          minimum: 8
+          maximum: 19
+        collection_end_hour:
+          type: integer
+          format: int32
+          minimum: 9
+          maximum: 20
+        collection_on_sundays:
+          type: boolean
+        collection_on_holidays:
+          type: boolean
+        interest_enabled:
+          type: boolean
+        late_fee_bps:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 200
+        monthly_interest_bps:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 100
+        pix_key:
+          type: string
+          maxLength: 77
+        pix_merchant_name:
+          type: string
+          maxLength: 25
+        pix_merchant_city:
+          type: string
+          maxLength: 15
+    TenantResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Tenant"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    Member:
+      type: object
+      required: [user, role, created_at]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        role:
+          $ref: "#/components/schemas/Role"
+        created_at:
+          $ref: "#/components/schemas/Instant"
+    MemberInput:
+      type: object
+      required: [name, phone, password, role]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        phone:
+          type: string
+          maxLength: 32
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+          description: Senha inicial, a ser trocada no primeiro acesso.
+        role:
+          $ref: "#/components/schemas/Role"
+    MemberResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Member"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    MemberListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Member"
+        meta:
+          $ref: "#/components/schemas/Meta"
+
+    # ---------- Clientes ----------
+    PreferredPayment:
+      type: object
+      description: Quando o cliente costuma pagar.
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [DAY_OF_MONTH, FORTNIGHT, BENEFIT_DAY, SEASON, OTHER]
+        day:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 31
+          description: Dia do mês, quando se aplica.
+        note:
+          type: string
+          maxLength: 120
+          examples: ["Depois do defeso"]
+    Balance:
+      type: object
+      required: [balance_cents, open_sales_count, version]
+      properties:
+        balance_cents:
+          $ref: "#/components/schemas/BalanceCents"
+        open_sales_count:
+          type: integer
+          format: int32
+        oldest_open_sale_on:
+          $ref: "#/components/schemas/CivilDate"
+        last_payment_on:
+          $ref: "#/components/schemas/CivilDate"
+        version:
+          type: integer
+          format: int64
+    Customer:
+      type: object
+      required: [id, name, status, balance, version, created_at, updated_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        name:
+          type: string
+        nickname:
+          type: string
+        phone:
+          $ref: "#/components/schemas/PhoneE164"
+        community:
+          type: string
+        reference_point:
+          type: string
+        notes:
+          type: string
+        credit_limit_cents:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Ausente quando o cliente não tem limite definido.
+        preferred_payment:
+          $ref: "#/components/schemas/PreferredPayment"
+        communication_consent:
+          type: boolean
+          description: Indica se há consentimento vigente para receber mensagens.
+        status:
+          type: string
+          enum: [active, archived, anonymized]
+        balance:
+          $ref: "#/components/schemas/Balance"
+        version:
+          type: integer
+          format: int64
+        created_at:
+          $ref: "#/components/schemas/Instant"
+        updated_at:
+          $ref: "#/components/schemas/Instant"
+    CustomerInput:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: UUIDv7 gerado pelo cliente da API.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        nickname:
+          type: string
+          maxLength: 60
+        phone:
+          type: string
+          maxLength: 32
+          description: Formato livre; é normalizado para E.164.
+        community:
+          type: string
+          maxLength: 120
+        reference_point:
+          type: string
+          maxLength: 200
+        notes:
+          type: string
+          maxLength: 500
+        credit_limit_cents:
+          type: integer
+          format: int64
+          minimum: 0
+        preferred_payment:
+          $ref: "#/components/schemas/PreferredPayment"
+    CustomerUpdate:
+      type: object
+      required: [version]
+      properties:
+        version:
+          type: integer
+          format: int64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        nickname:
+          type: string
+          maxLength: 60
+        phone:
+          type: string
+          maxLength: 32
+        community:
+          type: string
+          maxLength: 120
+        reference_point:
+          type: string
+          maxLength: 200
+        notes:
+          type: string
+          maxLength: 500
+        credit_limit_cents:
+          type: integer
+          format: int64
+          minimum: 0
+        clear_credit_limit:
+          type: boolean
+          description: Quando `true`, remove o limite de crédito.
+        preferred_payment:
+          $ref: "#/components/schemas/PreferredPayment"
+    CustomerResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Customer"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    CustomerListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Customer"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+    ConsentInput:
+      type: object
+      required: [channel, status, evidence]
+      properties:
+        channel:
+          type: string
+          enum: [WHATSAPP, SMS, EMAIL]
+        status:
+          type: string
+          enum: [GRANTED, REVOKED]
+        evidence:
+          type: string
+          maxLength: 300
+          description: Como o consentimento foi obtido.
+          examples: ["Autorizou verbalmente no balcão em 13/11/2026"]
+    Consent:
+      type: object
+      required: [id, channel, status, evidence, recorded_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        channel:
+          type: string
+          enum: [WHATSAPP, SMS, EMAIL]
+        status:
+          type: string
+          enum: [GRANTED, REVOKED]
+        evidence:
+          type: string
+        recorded_at:
+          $ref: "#/components/schemas/Instant"
+    ConsentResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Consent"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    AnonymizeInput:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 300
+    CustomerDataExport:
+      type: object
+      required: [customer, consents, entries]
+      properties:
+        customer:
+          $ref: "#/components/schemas/Customer"
+        consents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Consent"
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/Entry"
+    CustomerDataExportResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/CustomerDataExport"
+        meta:
+          $ref: "#/components/schemas/Meta"
+
+    # ---------- Lançamentos ----------
+    Entry:
+      type: object
+      required:
+        - id
+        - customer_id
+        - type
+        - direction
+        - amount_cents
+        - occurred_on
+        - recorded_at
+        - author_id
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        customer_id:
+          $ref: "#/components/schemas/Uuid"
+        type:
+          $ref: "#/components/schemas/EntryType"
+        direction:
+          $ref: "#/components/schemas/Direction"
+        amount_cents:
+          $ref: "#/components/schemas/AmountCents"
+        occurred_on:
+          $ref: "#/components/schemas/CivilDate"
+        recorded_at:
+          $ref: "#/components/schemas/Instant"
+        payment_method:
+          $ref: "#/components/schemas/PaymentMethod"
+        description:
+          type: string
+        reason:
+          type: string
+          description: Motivo, obrigatório em estorno e ajuste.
+        author_id:
+          $ref: "#/components/schemas/Uuid"
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        reverses_entry_id:
+          $ref: "#/components/schemas/Uuid"
+        reversed_by_entry_id:
+          $ref: "#/components/schemas/Uuid"
+    CreditSaleInput:
+      type: object
+      required: [id, customer_id, amount_cents, occurred_on]
+      properties:
+        id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: UUIDv7 gerado pelo cliente da API.
+        customer_id:
+          $ref: "#/components/schemas/Uuid"
+        amount_cents:
+          $ref: "#/components/schemas/AmountCents"
+        occurred_on:
+          $ref: "#/components/schemas/CivilDate"
+        description:
+          type: string
+          maxLength: 200
+        credit_limit_override_reason:
+          type: string
+          maxLength: 200
+          description: >-
+            Motivo da liberação pontual de limite. Só é aceito de Gerente ou Dono.
+    PaymentInput:
+      type: object
+      required: [id, customer_id, amount_cents, occurred_on, payment_method]
+      properties:
+        id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: UUIDv7 gerado pelo cliente da API.
+        customer_id:
+          $ref: "#/components/schemas/Uuid"
+        amount_cents:
+          $ref: "#/components/schemas/AmountCents"
+        occurred_on:
+          $ref: "#/components/schemas/CivilDate"
+        payment_method:
+          $ref: "#/components/schemas/PaymentMethod"
+        description:
+          type: string
+          maxLength: 200
+          description: Obrigatória quando `payment_method` é `OTHER`.
+    AdjustmentInput:
+      type: object
+      required: [id, customer_id, amount_cents, direction, occurred_on, reason]
+      properties:
+        id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: UUIDv7 gerado pelo cliente da API.
+        customer_id:
+          $ref: "#/components/schemas/Uuid"
+        amount_cents:
+          $ref: "#/components/schemas/AmountCents"
+        direction:
+          $ref: "#/components/schemas/Direction"
+        occurred_on:
+          $ref: "#/components/schemas/CivilDate"
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 300
+    ReversalInput:
+      type: object
+      required: [id, reason]
+      properties:
+        id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: UUIDv7 do lançamento de estorno, gerado pelo cliente da API.
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 300
+    Allocation:
+      type: object
+      required: [payment_entry_id, sale_entry_id, amount_cents]
+      properties:
+        payment_entry_id:
+          $ref: "#/components/schemas/Uuid"
+        sale_entry_id:
+          $ref: "#/components/schemas/Uuid"
+        amount_cents:
+          $ref: "#/components/schemas/AmountCents"
+    EntryResult:
+      type: object
+      required: [entry, balance]
+      properties:
+        entry:
+          $ref: "#/components/schemas/Entry"
+        balance:
+          $ref: "#/components/schemas/Balance"
+        allocations:
+          type: array
+          description: Alocações criadas por este lançamento.
+          items:
+            $ref: "#/components/schemas/Allocation"
+        warnings:
+          type: array
+          description: Avisos que não impedem o lançamento, como limite em modo aviso.
+          items:
+            $ref: "#/components/schemas/ProblemCode"
+    EntryResultResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/EntryResult"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    EntryResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Entry"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    EntryListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Entry"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+    OpenSale:
+      type: object
+      required: [entry_id, occurred_on, original_cents, open_cents, status]
+      properties:
+        entry_id:
+          $ref: "#/components/schemas/Uuid"
+        occurred_on:
+          $ref: "#/components/schemas/CivilDate"
+        description:
+          type: string
+        original_cents:
+          $ref: "#/components/schemas/AmountCents"
+        open_cents:
+          type: integer
+          format: int64
+          minimum: 0
+        status:
+          type: string
+          enum: [OPEN, PARTIAL, PAID, REVERSED]
+    OpenSaleListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenSale"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+
+    # ---------- Cobrança ----------
+    CollectionMessageInput:
+      type: object
+      properties:
+        include_pix_code:
+          type: boolean
+          default: true
+        tone:
+          type: string
+          enum: [REMINDER, FOLLOW_UP]
+          default: REMINDER
+    CollectionMessage:
+      type: object
+      required: [text, whatsapp_url, balance_cents]
+      properties:
+        text:
+          type: string
+        whatsapp_url:
+          type: string
+          format: uri
+          examples: ["https://wa.me/5592991234567?text=Ol%C3%A1"]
+        balance_cents:
+          $ref: "#/components/schemas/BalanceCents"
+        pix_code:
+          type: string
+    CollectionMessageResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/CollectionMessage"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    PixCodeInput:
+      type: object
+      properties:
+        amount_cents:
+          allOf:
+            - $ref: "#/components/schemas/AmountCents"
+          description: Padrão é o saldo devedor atual do cliente.
+    PixCode:
+      type: object
+      required: [code, amount_cents]
+      properties:
+        code:
+          type: string
+          description: Payload BR Code (EMV) para copia e cola e QR Code.
+        amount_cents:
+          $ref: "#/components/schemas/AmountCents"
+    PixCodeResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/PixCode"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    Receipt:
+      type: object
+      required: [entry, text, balance_cents]
+      properties:
+        entry:
+          $ref: "#/components/schemas/Entry"
+        text:
+          type: string
+        whatsapp_url:
+          type: string
+          format: uri
+          description: Ausente quando o cliente não tem telefone.
+        balance_cents:
+          $ref: "#/components/schemas/BalanceCents"
+    ReceiptResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Receipt"
+        meta:
+          $ref: "#/components/schemas/Meta"
+
+    # ---------- Sincronização ----------
+    Device:
+      type: object
+      required: [id, name, user_id, created_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        name:
+          type: string
+        user_id:
+          $ref: "#/components/schemas/Uuid"
+        created_at:
+          $ref: "#/components/schemas/Instant"
+        last_seen_at:
+          $ref: "#/components/schemas/Instant"
+        revoked_at:
+          $ref: "#/components/schemas/Instant"
+    DeviceListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    SyncCommandBase:
+      type: object
+      required: [command_id, type, client_recorded_at]
+      properties:
+        command_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: UUIDv7 do comando; chave de idempotência.
+        type:
+          type: string
+        client_recorded_at:
+          allOf:
+            - $ref: "#/components/schemas/Instant"
+          description: Instante em que o comando foi gravado no dispositivo.
+    CreateCustomerCommand:
+      allOf:
+        - $ref: "#/components/schemas/SyncCommandBase"
+        - type: object
+          required: [payload]
+          properties:
+            payload:
+              $ref: "#/components/schemas/CustomerInput"
+    RecordCreditSaleCommand:
+      allOf:
+        - $ref: "#/components/schemas/SyncCommandBase"
+        - type: object
+          required: [payload]
+          properties:
+            base_version:
+              type: integer
+              format: int64
+              description: Versão do saldo que o dispositivo conhecia.
+            payload:
+              $ref: "#/components/schemas/CreditSaleInput"
+    RecordPaymentCommand:
+      allOf:
+        - $ref: "#/components/schemas/SyncCommandBase"
+        - type: object
+          required: [payload]
+          properties:
+            base_version:
+              type: integer
+              format: int64
+            payload:
+              $ref: "#/components/schemas/PaymentInput"
+    ReverseEntryCommand:
+      allOf:
+        - $ref: "#/components/schemas/SyncCommandBase"
+        - type: object
+          required: [entry_id, payload]
+          properties:
+            entry_id:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              description: Lançamento a estornar.
+            payload:
+              $ref: "#/components/schemas/ReversalInput"
+    SyncCommand:
+      oneOf:
+        - $ref: "#/components/schemas/CreateCustomerCommand"
+        - $ref: "#/components/schemas/RecordCreditSaleCommand"
+        - $ref: "#/components/schemas/RecordPaymentCommand"
+        - $ref: "#/components/schemas/ReverseEntryCommand"
+      discriminator:
+        propertyName: type
+        mapping:
+          CreateCustomer: "#/components/schemas/CreateCustomerCommand"
+          RecordCreditSale: "#/components/schemas/RecordCreditSaleCommand"
+          RecordPayment: "#/components/schemas/RecordPaymentCommand"
+          ReverseEntry: "#/components/schemas/ReverseEntryCommand"
+    SyncPushRequest:
+      type: object
+      required: [commands]
+      properties:
+        commands:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SyncCommand"
+    SyncCommandResult:
+      type: object
+      required: [command_id, status]
+      properties:
+        command_id:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          type: string
+          enum: [applied, duplicate, rejected, needs_review]
+        code:
+          allOf:
+            - $ref: "#/components/schemas/ProblemCode"
+          description: Motivo, quando `rejected` ou `needs_review`.
+        message:
+          type: string
+          description: Explicação em pt-BR para exibir ao usuário.
+        review_item_id:
+          $ref: "#/components/schemas/Uuid"
+    SyncPushResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncCommandResult"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    SyncChange:
+      type: object
+      description: >-
+        Uma mudança no comércio. Exatamente um entre `customer`, `entry`,
+        `balance` e `open_sale` vem preenchido, conforme `entity_type`.
+      required: [seq, entity_type, entity_id, operation]
+      properties:
+        seq:
+          type: integer
+          format: int64
+        entity_type:
+          type: string
+          enum: [customer, entry, balance, open_sale, tenant_settings]
+        entity_id:
+          $ref: "#/components/schemas/Uuid"
+        operation:
+          type: string
+          enum: [upsert, remove]
+        customer:
+          $ref: "#/components/schemas/Customer"
+        entry:
+          $ref: "#/components/schemas/Entry"
+        balance:
+          $ref: "#/components/schemas/Balance"
+        open_sale:
+          $ref: "#/components/schemas/OpenSale"
+        tenant_settings:
+          $ref: "#/components/schemas/TenantSettings"
+    SyncPullResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncChange"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+    ReviewItem:
+      type: object
+      required: [id, command_id, reason_code, command, status, created_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        command_id:
+          $ref: "#/components/schemas/Uuid"
+        reason_code:
+          $ref: "#/components/schemas/ProblemCode"
+        message:
+          type: string
+        command:
+          $ref: "#/components/schemas/SyncCommand"
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          type: string
+          enum: [pending, resolved]
+        resolution:
+          type: string
+          enum: [APPROVED, DISCARDED]
+        resolved_by:
+          $ref: "#/components/schemas/Uuid"
+        resolved_at:
+          $ref: "#/components/schemas/Instant"
+        created_at:
+          $ref: "#/components/schemas/Instant"
+    ReviewResolutionInput:
+      type: object
+      required: [resolution, note]
+      properties:
+        resolution:
+          type: string
+          enum: [APPROVED, DISCARDED]
+          description: >-
+            `APPROVED` aplica o comando com a autorização de quem resolve;
+            `DISCARDED` descarta o comando e registra o motivo.
+        note:
+          type: string
+          minLength: 3
+          maxLength: 300
+    ReviewItemResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/ReviewItem"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    ReviewItemListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReviewItem"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+
+    # ---------- Relatórios ----------
+    Summary:
+      type: object
+      required:
+        - from
+        - to
+        - total_receivable_cents
+        - customers_with_debt
+        - overdue_customers
+        - sold_cents
+        - received_cents
+      properties:
+        from:
+          $ref: "#/components/schemas/CivilDate"
+        to:
+          $ref: "#/components/schemas/CivilDate"
+        total_receivable_cents:
+          type: integer
+          format: int64
+          description: Soma dos saldos devedores de todos os clientes.
+        customers_with_debt:
+          type: integer
+          format: int32
+        overdue_customers:
+          type: integer
+          format: int32
+          description: Clientes com compra em aberto há mais de 30 dias.
+        sold_cents:
+          type: integer
+          format: int64
+          description: Total vendido no fiado no período.
+        received_cents:
+          type: integer
+          format: int64
+          description: Total recebido no período.
+    SummaryResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Summary"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    CashClosingLine:
+      type: object
+      required: [operator_id, operator_name, cash_cents, pix_cents, card_cents, other_cents, total_cents]
+      properties:
+        operator_id:
+          $ref: "#/components/schemas/Uuid"
+        operator_name:
+          type: string
+        cash_cents:
+          type: integer
+          format: int64
+        pix_cents:
+          type: integer
+          format: int64
+        card_cents:
+          type: integer
+          format: int64
+        other_cents:
+          type: integer
+          format: int64
+        total_cents:
+          type: integer
+          format: int64
+    CashClosing:
+      type: object
+      required: [date, lines, total_cents]
+      properties:
+        date:
+          $ref: "#/components/schemas/CivilDate"
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/CashClosingLine"
+        total_cents:
+          type: integer
+          format: int64
+    CashClosingResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/CashClosing"
+        meta:
+          $ref: "#/components/schemas/Meta"
