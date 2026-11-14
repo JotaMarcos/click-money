@@ -20,7 +20,6 @@ Só entram as dependências desta lista. Uma dependência nova exige atualizar e
 | `github.com/pressly/goose/v3` | Migrações | Dialetos PostgreSQL e SQLite, uso como biblioteca em `cmd/migrate` |
 | `go.mongodb.org/mongo-driver/v2` | MongoDB | Driver oficial |
 | `github.com/oapi-codegen/runtime` | Suporte ao código gerado | Exigido pelo gerador |
-| `github.com/google/uuid` | UUIDv7 | Implementação mantida da RFC 9562 |
 | `golang.org/x/crypto` | Argon2id | Não está na biblioteca padrão |
 | `golang.org/x/sync` | `errgroup` | Não está na biblioteca padrão |
 | `go.opentelemetry.io/otel` e SDK | Traces e métricas | Padrão de mercado, exigido |
@@ -48,6 +47,7 @@ Só entram as dependências desta lista. Uma dependência nova exige atualizar e
 
 ### Feito em casa, de propósito
 
+- Geração de UUIDv7 (RFC 9562): cerca de quarenta linhas em `platform/idgen`, com contador monotônico por milissegundo e testes de ordenação e unicidade.
 - Asserções de teste: biblioteca padrão, sem `testify`.
 - Roteamento e middlewares HTTP: `net/http`.
 - Configuração por variáveis de ambiente: leitor próprio com validação.
