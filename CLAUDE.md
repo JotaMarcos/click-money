@@ -9,6 +9,7 @@ A especificação oficial do produto é o prompt-mestre abaixo; ela prevalece so
 ## Situação
 
 - Etapa 2 (arquitetura) concluída: ADRs, diagramas, contrato `api/openapi.yaml`, backlog das Fases 0 e 1.
+- O trabalho está em branches empilhadas, ainda sem merge na `main`: `docs/etapa-2-arquitetura` e, sobre ela, `feat/fase-0-fundacao`.
 - Fase 0 em andamento: existe `internal/platform` (tipos compartilhados, config, logs, HTTP, banco, migrações, outbox) e os três binários. Ainda **não** existem módulos de negócio (`ledger`, `customers` etc.), PWA (`web/`), geração de código (`oapi-codegen`, `sqlc`), OpenTelemetry, Dockerfile, CI nem testes de integração com PostgreSQL. Ver `docs/backlog/fase-0.md`.
 
 ## Comandos
@@ -54,6 +55,15 @@ Monólito modular hexagonal (ADR 0001). Módulo Go único: `github.com/JotaMarco
 - UUIDs trafegam como texto; converta com `kernel.ParseID`.
 - Toda migração existe em `migrations/postgres` **e** `migrations/sqlite`, é reversível e é embutida no binário. RLS, papéis e permissões só existem na de PostgreSQL. A API nunca migra ao subir.
 - Em teste, `dbtest.NewSQLite(t)` devolve um banco em memória já migrado.
+- O SQLite é aberto com **uma única conexão**. Usar `d.SQL()` diretamente (ou qualquer acesso fora do `db.Tx(ctx)`) de dentro de um Unit of Work trava para sempre, esperando a conexão que a própria transação segura.
+
+**Armadilhas da camada HTTP** (`internal/platform/httpx`, montada em `cmd/api/main.go`):
+
+- A ordem da cadeia importa: `RequestID` vem antes de `AccessLog`, que vem antes de `Recover`, para que todo log e toda resposta de erro tenham `request_id`.
+- `AccessLog` lê a rota de `r.Pattern`, que o `ServeMux` preenche no mesmo `*http.Request`. Um middleware colocado entre `AccessLog` e o mux que chame `r.WithContext` cria uma cópia e a rota passa a sair como "sem rota". Autenticação e tenant, quando chegarem, precisam entrar antes de `AccessLog` ou embrulhar os handlers no registro das rotas.
+- Corpo JSON só por `httpx.DecodeJSON`: ele recusa campos desconhecidos (é o que impede um `tenant_id` enviado pelo cliente de ser aceito em silêncio) e traduz corpo grande demais em 413.
+
+**Outbox:** cada rodada do `Relay` lê no máximo um evento por agregado, e um evento que falha segura os seguintes do mesmo agregado, inclusive depois de esgotar as tentativas. Isso é intencional (não aplicar eventos fora de ordem); o sinal de alerta é `Stats.Failed`.
 
 **Regras que o compilador não impõe:**
 
