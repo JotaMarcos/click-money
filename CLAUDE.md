@@ -10,7 +10,7 @@ A especificação oficial do produto é o prompt-mestre abaixo; ela prevalece so
 
 - Etapa 2 (arquitetura) concluída: ADRs, diagramas, contrato `api/openapi.yaml`, backlog das Fases 0 e 1.
 - O trabalho está em branches empilhadas, ainda sem merge na `main`: `docs/etapa-2-arquitetura` e, sobre ela, `feat/fase-0-fundacao`.
-- Fase 0 em andamento: existe `internal/platform` (tipos compartilhados, config, logs, HTTP, banco, migrações, outbox) e os três binários. Ainda **não** existem módulos de negócio (`ledger`, `customers` etc.), PWA (`web/`), geração de código (`oapi-codegen`, `sqlc`), OpenTelemetry, Dockerfile, CI nem testes de integração com PostgreSQL. Ver `docs/backlog/fase-0.md`.
+- Fase 0 em andamento: existe `internal/platform` (tipos compartilhados, config, logs, HTTP, banco, migrações, outbox), os três binários e o teste de arquitetura (`internal/architecture_test.go`). Ainda **não** existem módulos de negócio (`ledger`, `customers` etc.), PWA (`web/`), geração de código (`oapi-codegen`, `sqlc`), OpenTelemetry, Dockerfile, CI nem testes de integração com PostgreSQL. Ver `docs/backlog/fase-0.md`.
 
 ## Comandos
 
@@ -31,6 +31,8 @@ gofmt -l . && go vet ./...     # deve sair vazio antes de commitar
 CGO_ENABLED=0 go build -o bin/ ./cmd/...
 ```
 
+- O `go` pode não estar no `PATH` do shell da sessão; ele fica em `C:\Program Files\Go\bin` (no PowerShell: `$env:Path = "C:\Program Files\Go\bin;" + $env:Path`).
+- `go test ./internal -run TestDependencyRules` é o teste de arquitetura: lê os imports de `internal/` e falha quando uma camada importa o que não pode (regras em `docs/architecture/estrutura-de-diretorios.md`). Mudou uma regra de dependência? Mude a tabela do documento e `checkImport` juntos.
 - `go test -race` falha nesta máquina com `exit status 0xc0000139` (o MinGW instalado é antigo demais para o runtime do detector). Rode sem `-race` aqui; o `-race` é obrigação do CI em Linux.
 - `golangci-lint`, `govulncheck` e `gosec` ainda não estão instalados nem configurados.
 - Configuração por variáveis `CM_*` (ver `.env.example`). O `.env` só é lido quando `CM_ENV` é `development`. Fora de desenvolvimento, `config.Load` exige PostgreSQL e origens `https`.
