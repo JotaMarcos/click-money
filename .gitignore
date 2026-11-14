@@ -8,3 +8,4 @@ bin/
 coverage/
 *.log
 !.env.example
+coverage.out
